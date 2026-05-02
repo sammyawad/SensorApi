@@ -1,0 +1,27 @@
+## Ignore build artifacts
+bin/
+obj/
+Debug/
+Release/
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+*.runtimeconfig.dev.json
+
+## Ignore IDE files
+.vs/
+*.user
+*.suo
+*.userosscache
+
+## Ignore test results
+TestResults/
+
+## Ignore NuGet
+*.nupkg
+*.snupkg
+packages/
+*.nuget.g.props
+*.nuget.g.targets
