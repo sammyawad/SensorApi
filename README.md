@@ -31,42 +31,6 @@ The store is a **dictionary of per-sensor time-series buckets**. Each bucket hol
 - **Locking is per-sensor.** Two writers targeting different sensors never contend. Reads on a sensor never block other reads on the same sensor (`ReaderWriterLockSlim`). Lookups in the sensor map itself are lock-free (`ConcurrentDictionary`).
 - **Read returns a copied slice**, so callers never hold a reference into the locked list.
 
-## Flow chart
-
-```mermaid
-flowchart TD
-    subgraph Clients
-        W[Write Client<br/>1000 sensors × 10/s]
-        R[Read Client<br/>sensors + time range]
-    end
-
-    subgraph API[ASP.NET Core API]
-        WC[POST /api/data<br/>DataController.Write]
-        RC[GET /api/data<br/>DataController.Read]
-    end
-
-    subgraph Store[SensorStore - in-memory]
-        D[ConcurrentDictionary&lt;sensor, SensorTimeSeries&gt;]
-        TS1[SensorTimeSeries 'Temp 01'<br/>List&lt;DataPoint&gt; + RW lock]
-        TS2[SensorTimeSeries 'Temp 02'<br/>List&lt;DataPoint&gt; + RW lock]
-        TSN[... per sensor]
-    end
-
-    W -->|batch of readings| WC
-    R -->|sensors, from, to| RC
-
-    WC -->|GetOrAdd sensor| D
-    D --> TS1
-    D --> TS2
-    D --> TSN
-    WC -->|EnterWriteLock + Append O 1| TS1
-
-    RC -->|TryGet each sensor| D
-    RC -->|EnterReadLock + binary search range| TS1
-    TS1 -->|copied slice| RC
-    RC -->|ReadResponse JSON| R
-```
-
 ## API
 
 ### Write — `POST /api/data`
@@ -100,13 +64,31 @@ Repeated `sensors` query parameters; ISO-8601 timestamps for `from` and `to`. Re
 
 Sensors that have no data (or do not exist) return an empty array.
 
-## Running
+## Running the Solution (Live Demo)
 
+To demonstrate the API handling the required continuous load while responding to variable user input, we use a two-terminal setup.
+
+**Terminal 1: Start the API**
 ```powershell
 dotnet run --project SensorApi
 ```
+The API listens on the default Kestrel ports printed at startup (e.g., `http://localhost:5258`).
 
-The API listens on the default Kestrel ports printed at startup.
+**Terminal 2: Start the Client Simulator**
+```powershell
+dotnet run --project SensorApi.Client
+```
+The client will immediately:
+1. Spawn 5 background tasks (clients), each managing 1,000 sensors.
+2. Continuously send 10 points per second per sensor to the API (satisfying the *"Each client stores data for 1000 sensors at a rate of 10 data points per second"* requirement).
+3. Provide an interactive console prompt (`Query> `) where you can request a variable number of sensors over a requested time range.
+
+*Example CLI Usage:*
+```text
+Query> 5 10
+[Success] Retrieved 500 points across 5 sensors in 14ms
+```
+*(This queries 5 sensors for the last 10 seconds of data, pulling down exactly the continuous stream the writers are pushing).*
 
 ## Testing
 
