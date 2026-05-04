@@ -66,29 +66,46 @@ Sensors that have no data (or do not exist) return an empty array.
 
 ## Running the Solution (Live Demo)
 
-To demonstrate the API handling the required continuous load while responding to variable user input, we use a two-terminal setup.
+Two terminals: one runs the API, one runs the client simulator that drives both write load and interactive reads.
 
 **Terminal 1: Start the API**
 ```powershell
 dotnet run --project SensorApi
 ```
-The API listens on the default Kestrel ports printed at startup (e.g., `http://localhost:5258`).
+The API listens on the default Kestrel port printed at startup (e.g., `http://localhost:5258`).
 
-**Terminal 2: Start the Client Simulator**
+**Terminal 2: Start the Client**
 ```powershell
 dotnet run --project SensorApi.Client
 ```
-The client will immediately:
-1. Spawn 5 background tasks (clients), each managing 1,000 sensors.
-2. Continuously send 10 points per second per sensor to the API (satisfying the *"Each client stores data for 1000 sensors at a rate of 10 data points per second"* requirement).
-3. Provide an interactive console prompt (`Query> `) where you can request a variable number of sensors over a requested time range.
+If the API is on a non-default port, pass it as the first arg: `dotnet run --project SensorApi.Client -- http://localhost:1234`.
 
-*Example CLI Usage:*
+### What the client does
+
+On startup it spawns **5 background writers**. Each writer owns 1,000 sensors and posts a batch of 10,000 readings (10 timestamps × 1,000 sensors) once per second on a `PeriodicTimer` — that satisfies *"Each client stores data for 1000 sensors at a rate of 10 data points per second"* and *"Multiple clients should be used"*.
+
+While those writers run, the main thread is an **interactive read prompt**:
+
 ```text
-Query> 5 10
-[Success] Retrieved 500 points across 5 sensors in 14ms
+Sensors are named Client_<0..4>_Sensor_<0..999>.
+Type: <sensor> <seconds>   (or 'exit')
+
+Query> Client_0_Sensor_5 30
+[ok] 300 points in 4ms
+
+Query> Client_2_Sensor_42 10
+[ok] 100 points in 2ms
+
+Query> Client_99_Sensor_99 30
+[ok] 0 points in 1ms
+
+Query> bogus
+[err] expected: <sensor> <seconds>
 ```
-*(This queries 5 sensors for the last 10 seconds of data, pulling down exactly the continuous stream the writers are pushing).*
+
+The grammar is deliberately minimal: a sensor name, a number of seconds back from "now". The client converts that into the absolute `from`/`to` time range the API actually accepts, sends a `GET /api/data`, and prints points-returned + elapsed-ms on one line. That's the whole loop — every request demonstrates the spec's *"on demand with variable user input"* against an API that is simultaneously taking ~50,000 writes per second.
+
+The 10,000-points-per-request requirement is covered by the integration test ([DataEndpointTests.cs:88-108](SensorApi.Tests/DataEndpointTests.cs#L88-L108)), not the client.
 
 ## Testing
 

@@ -4,13 +4,16 @@ using SensorApi.Models;
 
 Console.WriteLine("--- Canary Labs Sensor API Client Simulator ---");
 Console.WriteLine("Make sure the SensorApi is running before starting.");
-var baseUrl = "http://localhost:5258";
+
+var baseUrl = args.FirstOrDefault()
+    ?? Environment.GetEnvironmentVariable("SENSORAPI_URL")
+    ?? "http://localhost:5258";
 
 var httpClient = new HttpClient { BaseAddress = new Uri(baseUrl) };
 
-// 1. Start background writers
-Console.WriteLine("\nStarting Background Writers...");
-const int numClients = 5; // The prompt requires: "Multiple clients should be used"
+Console.WriteLine($"\nTargeting API at {baseUrl}");
+Console.WriteLine("Starting Background Writers...");
+const int numClients = 5;
 
 for (int i = 0; i < numClients; i++)
 {
@@ -18,13 +21,10 @@ for (int i = 0; i < numClients; i++)
     _ = Task.Run(() => RunWriteClientAsync(httpClient, clientId));
 }
 
-Console.WriteLine($"Started {numClients} background writers (Each sending a batch of 10,000 time-series points/sec).");
+Console.WriteLine($"Started {numClients} writers — each pushing 1,000 sensors × 10 points/sec (10,000 pts/sec/client).");
 
-// 2. Interactive Reader
-Console.WriteLine("\n--- Interactive Read Client ---");
-Console.WriteLine("Format: <NumSensors> <SecondsBack>");
-Console.WriteLine("Example: 5 10 (Queries 5 sensors for the last 10 seconds)");
-Console.WriteLine("Type 'exit' to quit.");
+Console.WriteLine($"\nSensors are named Client_<0..{numClients - 1}>_Sensor_<0..999>.");
+Console.WriteLine("Type: <sensor> <seconds>   (or 'exit')");
 
 while (true)
 {
@@ -34,70 +34,31 @@ while (true)
     if (input.Equals("exit", StringComparison.OrdinalIgnoreCase)) break;
 
     var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-    if (parts.Length != 2 || !int.TryParse(parts[0], out int numSensorsToQuery) || !int.TryParse(parts[1], out int secondsBack))
+    if (parts.Length != 2 || !int.TryParse(parts[1], out int seconds))
     {
-        Console.WriteLine("Invalid format. Example: 5 10");
+        Console.WriteLine("[err] expected: <sensor> <seconds>");
         continue;
     }
 
-    if (numSensorsToQuery > 1000 * numClients)
-    {
-        Console.WriteLine($"Max sensors available is {1000 * numClients}. Limiting query.");
-        numSensorsToQuery = 1000 * numClients;
-    }
-
-    // Pick sensors evenly across clients to query
-    var sensorsToQuery = new List<string>();
-    for(int i = 0; i < numSensorsToQuery; i++)
-    {
-        int cId = i % numClients;
-        int sId = i / numClients;
-        sensorsToQuery.Add($"Client_{cId}_Sensor_{sId}");
-    }
-
+    var sensor = parts[0];
     var to = DateTime.UtcNow;
-    var from = to.AddSeconds(-secondsBack);
-
-    // Formulate the query string for all requested sensors
-    var sensorParams = string.Join("&", sensorsToQuery.Select(s => $"sensors={Uri.EscapeDataString(s)}"));
-    var queryUrl = $"/api/data?{sensorParams}&from={Uri.EscapeDataString(from.ToString("O"))}&to={Uri.EscapeDataString(to.ToString("O"))}";
+    var from = to.AddSeconds(-seconds);
+    var url = $"/api/data?sensors={Uri.EscapeDataString(sensor)}"
+            + $"&from={Uri.EscapeDataString(from.ToString("O"))}"
+            + $"&to={Uri.EscapeDataString(to.ToString("O"))}";
 
     try
     {
         var sw = Stopwatch.StartNew();
-        var response = await httpClient.GetFromJsonAsync<ReadResponse>(queryUrl);
+        var response = await httpClient.GetFromJsonAsync<ReadResponse>(url);
         sw.Stop();
 
-        if (response != null)
-        {
-            int totalPoints = response.Results.Values.Sum(v => v.Count);
-            Console.WriteLine($"[Success] Retrieved {totalPoints:N0} points across {numSensorsToQuery} sensors in {sw.ElapsedMilliseconds}ms");
-            
-            if (totalPoints > 0)
-            {
-                Console.WriteLine("\n          --- Data Breakdown ---");
-                var sampleSensors = response.Results.Where(kvp => kvp.Value.Count > 0).Take(3);
-                foreach (var kvp in sampleSensors)
-                {
-                    var sensorName = kvp.Key;
-                    var points = kvp.Value;
-                    var firstTime = points.First().Timestamp;
-                    var lastTime = points.Last().Timestamp;
-                    Console.WriteLine($"          [{sensorName}] : {points.Count} points (From: {firstTime:T} To: {lastTime:T})");
-                }
-                
-                int remainingSensors = response.Results.Count - 3;
-                if (remainingSensors > 0)
-                {
-                    Console.WriteLine($"          ... and {remainingSensors} more sensors.");
-                }
-                Console.WriteLine("          ----------------------\n");
-            }
-        }
+        var count = response?.Results.GetValueOrDefault(sensor)?.Count ?? 0;
+        Console.WriteLine($"[ok] {count} points in {sw.ElapsedMilliseconds}ms");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"[Error] {ex.Message}");
+        Console.WriteLine($"[err] {ex.Message}");
     }
 }
 
@@ -107,14 +68,15 @@ static async Task RunWriteClientAsync(HttpClient client, int clientId)
         .Select(i => $"Client_{clientId}_Sensor_{i}")
         .ToArray();
 
-    while (true)
+    using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+
+    while (await timer.WaitForNextTickAsync())
     {
         try
         {
             var now = DateTime.UtcNow;
             var readings = new List<SensorReading>(10000);
 
-            // Generate 10 chronological points for all 1000 sensors (10,000 points total)
             for (int offset = 0; offset < 10; offset++)
             {
                 var timestamp = now.AddMilliseconds(offset * 100);
@@ -127,11 +89,9 @@ static async Task RunWriteClientAsync(HttpClient client, int clientId)
             var request = new WriteRequest { Readings = readings };
             await client.PostAsJsonAsync("/api/data", request);
         }
-        catch 
+        catch (Exception ex)
         {
-            // Suppress background connection errors
+            Console.Error.WriteLine($"[Writer {clientId}] {ex.Message}");
         }
-
-        await Task.Delay(1000); // Wait 1 full second before sending the next batch
     }
 }
